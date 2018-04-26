@@ -5,13 +5,23 @@ import (
 
 	"github.com/hashicorp/terraform/config"
 	"github.com/hashicorp/terraform/dag"
+	"github.com/hashicorp/terraform/tfdiags"
 )
 
 // NodeRefreshableManagedResource represents a resource that is expanabled into
 // NodeRefreshableManagedResourceInstance. Resource count orphans are also added.
 type NodeRefreshableManagedResource struct {
-	*NodeAbstractCountResource
+	*NodeAbstractResource
 }
+
+var (
+	_ GraphNodeSubPath              = (*NodeRefreshableManagedResource)(nil)
+	_ GraphNodeDynamicExpandable    = (*NodeRefreshableManagedResource)(nil)
+	_ GraphNodeReferenceable        = (*NodeRefreshableManagedResource)(nil)
+	_ GraphNodeReferencer           = (*NodeRefreshableManagedResource)(nil)
+	_ GraphNodeResource             = (*NodeRefreshableManagedResource)(nil)
+	_ GraphNodeAttachResourceConfig = (*NodeRefreshableManagedResource)(nil)
+)
 
 // GraphNodeDynamicExpandable
 func (n *NodeRefreshableManagedResource) DynamicExpand(ctx EvalContext) (*Graph, error) {
@@ -20,20 +30,26 @@ func (n *NodeRefreshableManagedResource) DynamicExpand(ctx EvalContext) (*Graph,
 	lock.RLock()
 	defer lock.RUnlock()
 
-	// Expand the resource count which must be available by now from EvalTree
-	count, err := n.Config.Count()
-	if err != nil {
-		return nil, err
+	var diags tfdiags.Diagnostics
+
+	count, countDiags := evaluateResourceCountExpression(n.Config.Count, ctx)
+	diags = diags.Append(countDiags)
+	if countDiags.HasErrors() {
+		return nil, diags.Err()
 	}
 
+	// Next we need to potentially rename an instance address in the state
+	// if we're transitioning whether "count" is set at all.
+	fixResourceCountSetTransition(ctx, n.ResourceAddr().Resource, count != -1)
+
 	// The concrete resource factory we'll use
-	concreteResource := func(a *NodeAbstractResource) dag.Vertex {
+	concreteResource := func(a *NodeAbstractResourceInstance) dag.Vertex {
 		// Add the config and state since we don't do that via transforms
 		a.Config = n.Config
 		a.ResolvedProvider = n.ResolvedProvider
 
 		return &NodeRefreshableManagedResourceInstance{
-			NodeAbstractResource: a,
+			NodeAbstractResourceInstance: a,
 		}
 	}
 
@@ -59,7 +75,7 @@ func (n *NodeRefreshableManagedResource) DynamicExpand(ctx EvalContext) (*Graph,
 		&AttachStateTransformer{State: state},
 
 		// Targeting
-		&TargetsTransformer{ParsedTargets: n.Targets},
+		&TargetsTransformer{Targets: n.Targets},
 
 		// Connect references so ordering is correct
 		&ReferenceTransformer{},
@@ -75,14 +91,27 @@ func (n *NodeRefreshableManagedResource) DynamicExpand(ctx EvalContext) (*Graph,
 		Name:     "NodeRefreshableManagedResource",
 	}
 
-	return b.Build(ctx.Path())
+	graph, diags := b.Build(ctx.Path())
+	return graph, diags.ErrWithWarnings()
 }
 
 // NodeRefreshableManagedResourceInstance represents a resource that is "applyable":
 // it is ready to be applied and is represented by a diff.
 type NodeRefreshableManagedResourceInstance struct {
-	*NodeAbstractResource
+	*NodeAbstractResourceInstance
 }
+
+var (
+	_ GraphNodeSubPath              = (*NodeRefreshableManagedResourceInstance)(nil)
+	_ GraphNodeReferenceable        = (*NodeRefreshableManagedResourceInstance)(nil)
+	_ GraphNodeReferencer           = (*NodeRefreshableManagedResourceInstance)(nil)
+	_ GraphNodeDestroyer            = (*NodeRefreshableManagedResourceInstance)(nil)
+	_ GraphNodeResource             = (*NodeRefreshableManagedResourceInstance)(nil)
+	_ GraphNodeResourceInstance     = (*NodeRefreshableManagedResourceInstance)(nil)
+	_ GraphNodeAttachResourceConfig = (*NodeRefreshableManagedResourceInstance)(nil)
+	_ GraphNodeAttachResourceState  = (*NodeRefreshableManagedResourceInstance)(nil)
+	_ GraphNodeEvalable             = (*NodeRefreshableManagedResourceInstance)(nil)
+)
 
 // GraphNodeDestroyer
 func (n *NodeRefreshableManagedResourceInstance) DestroyAddr() *ResourceAddress {

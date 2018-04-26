@@ -2,16 +2,25 @@ package terraform
 
 import (
 	"fmt"
+
+	"github.com/hashicorp/terraform/tfdiags"
+
+	"github.com/hashicorp/terraform/addrs"
+	"github.com/hashicorp/terraform/configs"
+	"github.com/zclconf/go-cty/cty"
 )
 
 // EvalReadDataDiff is an EvalNode implementation that executes a data
 // resource's ReadDataDiff method to discover what attributes it exports.
 type EvalReadDataDiff struct {
-	Provider    *ResourceProvider
+	Addr           addrs.ResourceInstance
+	Config         *configs.Resource
+	Provider       *ResourceProvider
+	ProviderSchema **ProviderSchema
+
 	Output      **InstanceDiff
+	OutputValue *cty.Value
 	OutputState **InstanceState
-	Config      **ResourceConfig
-	Info        *InstanceInfo
 
 	// Set Previous when re-evaluating diff during apply, to ensure that
 	// the "Destroy" flag is preserved.
@@ -21,14 +30,20 @@ type EvalReadDataDiff struct {
 func (n *EvalReadDataDiff) Eval(ctx EvalContext) (interface{}, error) {
 	// TODO: test
 
+	var diags tfdiags.Diagnostics
+
+	// The provider and hook APIs still expect our legacy InstanceInfo type.
+	legacyInfo := NewInstanceInfo(n.Addr.Absolute(ctx.Path()).ContainingResource())
+
 	err := ctx.Hook(func(h Hook) (HookAction, error) {
-		return h.PreDiff(n.Info, nil)
+		return h.PreDiff(legacyInfo, nil)
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	var diff *InstanceDiff
+	var configVal cty.Value
 
 	if n.Previous != nil && *n.Previous != nil && (*n.Previous).GetDestroy() {
 		// If we're re-diffing for a diff that was already planning to
@@ -37,11 +52,28 @@ func (n *EvalReadDataDiff) Eval(ctx EvalContext) (interface{}, error) {
 	} else {
 		provider := *n.Provider
 		config := *n.Config
+		providerSchema := *n.ProviderSchema
+		schema := providerSchema.DataSources[n.Addr.Resource.Type]
+		if schema == nil {
+			// Should be caught during validation, so we don't bother with a pretty error here
+			return nil, fmt.Errorf("provider does not support data source %q", n.Addr.Resource.Type)
+		}
+
+		var configDiags tfdiags.Diagnostics
+		configVal, _, configDiags = ctx.EvaluateBlock(config.Config, schema, nil)
+		diags = diags.Append(configDiags)
+		if configDiags.HasErrors() {
+			return nil, diags.Err()
+		}
+
+		// The provider API still expects our legacy ResourceConfig type.
+		legacyRC := NewResourceConfigShimmed(configVal, schema)
 
 		var err error
-		diff, err = provider.ReadDataDiff(n.Info, config)
+		diff, err = provider.ReadDataDiff(legacyInfo, legacyRC)
 		if err != nil {
-			return nil, err
+			diags = diags.Append(err)
+			return nil, diags.Err()
 		}
 		if diff == nil {
 			diff = new(InstanceDiff)
@@ -61,13 +93,17 @@ func (n *EvalReadDataDiff) Eval(ctx EvalContext) (interface{}, error) {
 	}
 
 	err = ctx.Hook(func(h Hook) (HookAction, error) {
-		return h.PostDiff(n.Info, diff)
+		return h.PostDiff(legacyInfo, diff)
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	*n.Output = diff
+
+	if n.OutputValue != nil {
+		*n.OutputValue = configVal
+	}
 
 	if n.OutputState != nil {
 		state := &InstanceState{}
@@ -80,7 +116,7 @@ func (n *EvalReadDataDiff) Eval(ctx EvalContext) (interface{}, error) {
 		}
 	}
 
-	return nil, nil
+	return nil, diags.ErrWithWarnings()
 }
 
 // EvalReadDataApply is an EvalNode implementation that executes a data

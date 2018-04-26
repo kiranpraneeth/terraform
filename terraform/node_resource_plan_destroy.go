@@ -1,22 +1,39 @@
 package terraform
 
-// NodePlanDestroyableResource represents a resource that is "applyable":
-// it is ready to be applied and is represented by a diff.
-type NodePlanDestroyableResource struct {
-	*NodeAbstractResource
+import (
+	"github.com/hashicorp/terraform/addrs"
+)
+
+// NodePlanDestroyableResourceInstance represents a resource that is ready
+// to be planned for destruction.
+type NodePlanDestroyableResourceInstance struct {
+	*NodeAbstractResourceInstance
 }
 
+var (
+	_ GraphNodeSubPath              = (*NodePlanDestroyableResourceInstance)(nil)
+	_ GraphNodeReferenceable        = (*NodePlanDestroyableResourceInstance)(nil)
+	_ GraphNodeReferencer           = (*NodePlanDestroyableResourceInstance)(nil)
+	_ GraphNodeDestroyer            = (*NodePlanDestroyableResourceInstance)(nil)
+	_ GraphNodeResource             = (*NodePlanDestroyableResourceInstance)(nil)
+	_ GraphNodeResourceInstance     = (*NodePlanDestroyableResourceInstance)(nil)
+	_ GraphNodeAttachResourceConfig = (*NodePlanDestroyableResourceInstance)(nil)
+	_ GraphNodeAttachResourceState  = (*NodePlanDestroyableResourceInstance)(nil)
+	_ GraphNodeEvalable             = (*NodePlanDestroyableResourceInstance)(nil)
+)
+
 // GraphNodeDestroyer
-func (n *NodePlanDestroyableResource) DestroyAddr() *ResourceAddress {
-	return n.Addr
+func (n *NodePlanDestroyableResourceInstance) DestroyAddr() *addrs.AbsResourceInstance {
+	addr := n.ResourceInstanceAddr()
+	return &addr
 }
 
 // GraphNodeEvalable
-func (n *NodePlanDestroyableResource) EvalTree() EvalNode {
-	addr := n.NodeAbstractResource.Addr
+func (n *NodePlanDestroyableResourceInstance) EvalTree() EvalNode {
+	addr := n.ResourceInstanceAddr
 
 	// stateId is the ID to put into the state
-	stateId := addr.stateId()
+	stateId := addr.stateId() // TODO: convert to legacy ResourceAddress to get this method
 
 	// Build the instance info. More of this will be populated during eval
 	info := &InstanceInfo{

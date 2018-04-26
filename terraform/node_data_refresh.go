@@ -2,13 +2,22 @@ package terraform
 
 import (
 	"github.com/hashicorp/terraform/dag"
+	"github.com/hashicorp/terraform/tfdiags"
 )
 
-// NodeRefreshableDataResource represents a resource that is "plannable":
-// it is ready to be planned in order to create a diff.
+// NodeRefreshableDataResource represents a resource that is "refreshable".
 type NodeRefreshableDataResource struct {
-	*NodeAbstractCountResource
+	*NodeAbstractResource
 }
+
+var (
+	_ GraphNodeSubPath              = (*NodeRefreshableDataResource)(nil)
+	_ GraphNodeDynamicExpandable    = (*NodeRefreshableDataResource)(nil)
+	_ GraphNodeReferenceable        = (*NodeRefreshableDataResource)(nil)
+	_ GraphNodeReferencer           = (*NodeRefreshableDataResource)(nil)
+	_ GraphNodeResource             = (*NodeRefreshableDataResource)(nil)
+	_ GraphNodeAttachResourceConfig = (*NodeRefreshableDataResource)(nil)
+)
 
 // GraphNodeDynamicExpandable
 func (n *NodeRefreshableDataResource) DynamicExpand(ctx EvalContext) (*Graph, error) {
@@ -17,31 +26,37 @@ func (n *NodeRefreshableDataResource) DynamicExpand(ctx EvalContext) (*Graph, er
 	lock.RLock()
 	defer lock.RUnlock()
 
-	// Expand the resource count which must be available by now from EvalTree
-	count, err := n.Config.Count()
-	if err != nil {
-		return nil, err
+	var diags tfdiags.Diagnostics
+
+	count, countDiags := evaluateResourceCountExpression(n.Config.Count, ctx)
+	diags = diags.Append(countDiags)
+	if countDiags.HasErrors() {
+		return nil, diags.Err()
 	}
 
+	// Next we need to potentially rename an instance address in the state
+	// if we're transitioning whether "count" is set at all.
+	fixResourceCountSetTransition(ctx, n.ResourceAddr().Resource, count != -1)
+
 	// The concrete resource factory we'll use
-	concreteResource := func(a *NodeAbstractResource) dag.Vertex {
+	concreteResource := func(a *NodeAbstractResourceInstance) dag.Vertex {
 		// Add the config and state since we don't do that via transforms
 		a.Config = n.Config
 		a.ResolvedProvider = n.ResolvedProvider
 
 		return &NodeRefreshableDataResourceInstance{
-			NodeAbstractResource: a,
+			NodeAbstractResourceInstance: a,
 		}
 	}
 
 	// We also need a destroyable resource for orphans that are a result of a
 	// scaled-in count.
-	concreteResourceDestroyable := func(a *NodeAbstractResource) dag.Vertex {
+	concreteResourceDestroyable := func(a *NodeAbstractResourceInstance) dag.Vertex {
 		// Add the config since we don't do that via transforms
 		a.Config = n.Config
 
 		return &NodeDestroyableDataResource{
-			NodeAbstractResource: a,
+			NodeAbstractResourceInstance: a,
 		}
 	}
 
@@ -67,7 +82,7 @@ func (n *NodeRefreshableDataResource) DynamicExpand(ctx EvalContext) (*Graph, er
 		&AttachStateTransformer{State: state},
 
 		// Targeting
-		&TargetsTransformer{ParsedTargets: n.Targets},
+		&TargetsTransformer{Targets: n.Targets},
 
 		// Connect references so ordering is correct
 		&ReferenceTransformer{},
@@ -83,13 +98,14 @@ func (n *NodeRefreshableDataResource) DynamicExpand(ctx EvalContext) (*Graph, er
 		Name:     "NodeRefreshableDataResource",
 	}
 
-	return b.Build(ctx.Path())
+	graph, diags := b.Build(ctx.Path())
+	return graph, diags.ErrWithWarnings()
 }
 
-// NodeRefreshableDataResourceInstance represents a _single_ resource instance
+// NodeRefreshableDataResourceInstance represents a single resource instance
 // that is refreshable.
 type NodeRefreshableDataResourceInstance struct {
-	*NodeAbstractResource
+	*NodeAbstractResourceInstance
 }
 
 // GraphNodeEvalable
